@@ -21,6 +21,8 @@ const listingSchema = new mongoose.Schema(
     size: { type: String, size: 3, default: "" },
     brand: { type: String, default: "" },
     condition: {type: String, enum: ["new", "like-new", "good", "well-worn", "poor"], default: "good"},
+    isSponsored: { type: Boolean, default: false },
+    views: { type: Number, default: 0, increment: 1 },
     images: [{type: String}]
   },
   { timestamps: true }
@@ -33,14 +35,48 @@ export const Listing = mongoose.model("Listing", listingSchema);
 
 const router = Router();
 
+router.get('/search', async (req, res) => {
+  const q = req.query.q;
+
+  if (!q) {
+    return res.json([]);
+  }
+
+  const listings = await Listing.find(
+    {
+      $text: { $search: q }
+    },
+    {
+      score: { $meta: 'textScore' }
+    }
+  ).sort({
+    score: { $meta: 'textScore' }
+  });
+
+  res.json(listings);
+});
+
 router.get('/featured', async (req, res, next) => {
   try {
     const base = { status: 'active' }
     const limit = 10
 
-    const [mostViewed, lowestPrice, newest, highestPrice] = await Promise.all([
-      Listing.find(base).populate('seller', 'username location')
+    // Find users with account-level sponsorship
+    const sponsoredUsers = await User.find({ sponsored: true }).select('_id')
+    const sponsoredUserIds = sponsoredUsers.map(u => u._id)
+
+    const [sponsored, mostViewed, lowestPrice, newest, highestPrice] = await Promise.all([
+      Listing.find({
+        ...base,
+        $or: [
+          { isSponsored: true },
+          { seller: { $in: sponsoredUserIds } }
+        ]
+      }).populate('seller', 'username location')
         .sort({ views: -1 }).limit(limit),
+
+      Listing.find(base).populate('seller', 'username location')
+      .sort({ views: -1 }).limit(limit),
 
       Listing.find(base).populate('seller', 'username location')
         .sort({ price: 1 }).limit(limit),
@@ -52,9 +88,20 @@ router.get('/featured', async (req, res, next) => {
         .sort({ price: -1 }).limit(limit),
     ])
 
-    res.json({ mostViewed, lowestPrice, newest, highestPrice })
+    res.json({sponsored, mostViewed, lowestPrice, newest, highestPrice })
   } catch (err) { next(err) }
 })
+
+router.get('/user/:username', async (req, res, next) => {
+  try {
+    const user = await User.findOne({ username: req.params.username });
+    if (!user) return res.status(404).json({ success: false, error: "User not found" });
+    const listings = await Listing.find({ seller: user._id, status: 'active' })
+      .populate('seller', 'username avatar location')
+      .sort({ createdAt: -1 });
+    res.json(listings);
+  } catch (err) { next(err) }
+});
 
 router.get('/my', protect, async (req, res, next) => {
   try {
@@ -95,9 +142,10 @@ router.get("/listings",
 
 router.get("/listing/:id", 
   asyncHandler(async (req, res) => {
-    const listing = await Listing.findById(req.params.id).lean();
+    const listing = await Listing.findById(req.params.id).populate('seller', 'username avatar location bio').lean();
     if (!listing) {
-      return res.status(404).json({ success: false, error: "Listing not found" })};
+      return res.status(404).json({ success: false, error: "Listing not found" });
+    }
     return res.status(200).json(listing)
   })
 );

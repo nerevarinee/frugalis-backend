@@ -16,8 +16,13 @@ const userSchema = new mongoose.Schema(
     username:  { type: String, required: true, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true },
     password: { type: String, required: true},
-    avatar: { type: String}, 
-    role:  { type: String, enum: ["user", "admin"], default: "user" }
+    avatar: { type: String },
+    bio: { type: String, default: '' },
+    location: { type: String, default: '' },
+    whatsapp: { type: String, default: '' },
+    sponsored: { type: Boolean, default: false },
+    role:  { type: String, enum: ["user", "admin"], default: "user" },
+    devices: [{ token: String, platform: { type: String, enum: ["android", "ios"] } }]
   },
   { timestamps: true }
 );
@@ -29,7 +34,7 @@ const router = Router();
 
 router.get('/me/stats', protect, async (req, res, next) => {
   try {
-    const user = User.findOne({username: req.username})
+    const user = await User.findOne({username: req.username})
     const [active, sold, totalViews] = await Promise.all([
       
       Listing.countDocuments({ seller: user._id, status: 'active' }),
@@ -48,12 +53,31 @@ router.get('/me/stats', protect, async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
-router.get('/me', protect, upload.single('avatar'), async (req, res, next) => {
+router.get('/me', protect, async (req, res, next) => {
   try {
-      
     const user = await User.findOne({username: req.username})
-
     res.json(user)
+  } catch (err) { next(err) }
+})
+
+router.put('/me', protect, upload.single('avatar'), async (req, res, next) => {
+  try {
+    const user = await User.findOne({username: req.username})
+    if (!user) return res.status(404).json({ message: 'User not found' })
+
+    const updates = {}
+    if (req.body.username) updates.username = req.body.username
+    if (req.body.bio !== undefined) updates.bio = req.body.bio
+    if (req.body.location !== undefined) updates.location = req.body.location
+    if (req.body.whatsapp !== undefined) updates.whatsapp = req.body.whatsapp
+
+    if (req.file) {
+      const image = await uploadToCloudinary(req.file.buffer)
+      if (image) updates.avatar = image.secure_url
+    }
+
+    const updated = await User.findByIdAndUpdate(user._id, updates, { new: true })
+    res.json(updated)
   } catch (err) { next(err) }
 })
 
@@ -66,6 +90,35 @@ router.get("/profile/:id", asyncHandler(async (req, res) => {
       const user = await User.findById(req.params.id).lean();
       if (!user) return res.status(404).json({ success: false, error: "User not found" });
       return res.status(200).json(user)
+}));
+
+router.get("/profile/username/:username", asyncHandler(async (req, res, next) => {
+      try {
+        const user = await User.findOne({ username: req.params.username }).lean();
+        if (!user) return res.status(404).json({ success: false, error: "User not found" });
+
+        const [active, sold, totalViews] = await Promise.all([
+          Listing.countDocuments({ seller: user._id, status: 'active' }),
+          Listing.countDocuments({ seller: user._id, status: 'sold' }),
+          Listing.aggregate([
+            { $match: { seller: user._id } },
+            { $group: { _id: null, total: { $sum: '$views' } } }
+          ])
+        ]);
+
+        return res.status(200).json({
+          username: user.username,
+          avatar: user.avatar,
+          bio: user.bio,
+          location: user.location,
+          whatsapp: user.whatsapp,
+          sponsored: user.sponsored,
+          createdAt: user.createdAt,
+          activeListings: active,
+          soldListings: sold,
+          totalViews: totalViews[0]?.total ?? 0
+        });
+      } catch (err) { next(err) }
 }));
 
 router.post("/register", asyncHandler(async (req, res) => {
@@ -105,15 +158,16 @@ router.post("/login", asyncHandler(async (req, res) => {
             const hash = exist.password;
             const compare = await bcrypt.compare(password, hash);
             if(compare){
-                  //console.log()
-                  const token = await jwt.sign({ username: exist.username }, process.env.JWT_KEY);
+                  const token = await jwt.sign({ id: exist._id, username: exist.username }, process.env.JWT_KEY, {
+                        expiresIn: '8h'
+                  });
                   return res
                         .status(202)
                         .cookie('access_token', token, {
-                              expires: new Date(Date.now() + 8 * 3600000), // cookie will be removed after 8 hours
-                              httpOnly: true
+                              expires: new Date(Date.now() + 8 * 3600000),
+                              httpOnly: false
                         })
-                        .json({message: `User has been Logged on succesfully`})
+                        .json({message: `User has been Logged on succesfully`, token, user: { id: exist._id, username: exist.username, email: exist.email, avatar: exist.avatar }})
             }
             else {
                   return res.status(400).json({message: `ERROR,username or password are incorrect`})
@@ -149,6 +203,34 @@ router.post("/avatar", protect, upload.single("avatar"), asyncHandler(async (req
             return res.status(500).json({message: "avatar update was unsuccessful"})
       }
       return res.status(200).json({message: "avatar was updated successfully"})
+}));
+
+router.post("/device-token", protect, asyncHandler(async (req, res) => {
+      const { token, platform } = req.body;
+      if (!token || !platform) return res.status(400).json({ message: "token and platform are required" });
+      if (!["android", "ios"].includes(platform)) return res.status(400).json({ message: "platform must be android or ios" });
+
+      const user = await User.findOne({ username: req.username });
+      if (!user) return res.status(404).json({ message: "User not found" });
+
+      const existing = user.devices.find(d => d.token === token);
+      if (!existing) {
+        user.devices.push({ token, platform });
+        await user.save();
+      }
+      res.json({ message: "Device token registered" });
+}));
+
+router.delete("/device-token", protect, asyncHandler(async (req, res) => {
+      const { token } = req.body;
+      if (!token) return res.status(400).json({ message: "token is required" });
+
+      const user = await User.findOne({ username: req.username });
+      if (!user) return res.status(404).json({ message: "User not found" });
+
+      user.devices = user.devices.filter(d => d.token !== token);
+      await user.save();
+      res.json({ message: "Device token removed" });
 }));
 
 router.post("/logout", protect, asyncHandler(async (req, res) => {
