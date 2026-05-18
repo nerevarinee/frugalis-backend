@@ -9,6 +9,8 @@ import { requestLogger } from "./middleware/requestLogger.js";
 import userRouter from "./parts/user.part.js";
 import listingRouter from "./parts/listing.part.js";
 import orderRouter from "./parts/orders.part.js";
+import guestRouter from "./parts/guest.part.js";
+import messageRouter from "./parts/message.part.js";
 
 const app = express();
 
@@ -22,6 +24,8 @@ app.use(requestLogger);
 app.use("/api/users", userRouter);
 app.use("/api/listings", listingRouter);
 app.use("/api/orders", orderRouter);
+app.use("/api/guests", guestRouter);
+app.use("/api/messages", messageRouter);
 
 app.use(errorHandler);
 

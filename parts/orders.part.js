@@ -1,8 +1,10 @@
 import { Router } from "express";
 import mongoose from "mongoose";
+import jwt from 'jsonwebtoken'
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { validate } from "../middleware/validate.js";
 import { User } from "./user.part.js";
+import { Guest } from "./guest.part.js";
 import { Listing } from "./listing.part.js";
 import protect from "../middleware/protect.js";
 import upload from "../middleware/multer.js";
@@ -14,6 +16,7 @@ const router = Router();
 const orderSchema = new mongoose.Schema({
   listing:       { type: mongoose.Schema.Types.ObjectId, ref: 'Listing', required: true },
   seller:        { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  buyer:         { type: mongoose.Schema.Types.ObjectId, ref: 'Guest', default: null },
   tel:           { type: String, required: true },
   location:      { type: String, required: true },
   deliveryType:  { type: String, enum: ['pickup', 'delivery'], required: true },
@@ -61,9 +64,22 @@ router.post('/create', async (req, res, next) => {
     if (duplicate)
       return res.status(429).json({ message: 'You already have an active offer on this item' })
 
+    // try to link guest buyer if guest token is present
+    let buyerId = null
+    const guestToken = req.cookies.guest_token || req.body.guestToken || (req.headers.authorization?.startsWith('Bearer ') && req.headers.authorization.split(' ')[1])
+    if (guestToken) {
+      try {
+        const decoded = jwt.verify(guestToken, process.env.JWT_KEY)
+        if (decoded && decoded.role === 'guest' && decoded.guestId) {
+          buyerId = decoded.guestId
+        }
+      } catch {}
+    }
+
     const order = new Order({
       listing,
       seller: listingDoc.seller,
+      buyer: buyerId,
       tel,
       location,
       deliveryType,
